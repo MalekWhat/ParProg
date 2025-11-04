@@ -39,7 +39,6 @@ int main(int argc, char** argv) {
         }
         
     }
-    // Процессы 1, 2, 3, 4 НЕ заходят в этот if и просто ждут
     
     int chunk_size = length / num_processes;
     int start = rank * chunk_size;  
@@ -47,36 +46,30 @@ int main(int argc, char** argv) {
     
     int local_size = end - start;
     
-    cout << "Процесс " << rank << ": мой диапазон [" << start << ", " << end << ")" << endl;
-    
-    // ШАГ 5: КАЖДЫЙ ПРОЦЕСС СОЗДАЁТ СВОЙ ЛОКАЛЬНЫЙ БУФЕР
-    // Процесс 1 не может просто взять и прочитать mas[0], потому что mas есть только у процесса 0
-    // Поэтому КАЖДЫЙ процесс создаёт свой маленький массив для своей части данных
 
-    //int buffer_size = local_size + 2;
-    
-    unsigned char* local_data = new unsigned char[local_size];
+    int buffer_size = local_size + 2;
+    unsigned char* local_data = new unsigned char[buffer_size];
     
     if (rank == 0) {
         cout << "Процесс 0: раздаю данные" << endl;
         
         for (int i = 0; i < local_size; i++) {
-            local_data[i] = mas[i];
+            local_data[i+1] = mas[i];
         }
-        cout << "Процесс 0: скопировал свою часть" << endl;
+        local_data[0] = 0;  // Фиктивное значение
         
-        // Теперь отправляем данные процессам 1, 2, 3, 4
-        for (int dest = 1; dest < num_processes; dest++) {
-            int dest_start = dest * chunk_size;  // Откуда начинается кусок для процесса dest
+        //отправляем данные процессам 1, 2, 3, 4
+        for (int proc = 1; proc < num_processes; proc++) {
+            int proc_start = proc * chunk_size;
             
-            // 1. &mas[dest_start] - ОТКУДА берём данные (адрес начала)
+            // 1. &mas[proc_start] - ОТКУДА берём данные (адрес начала)
             // 2. chunk_size - СКОЛЬКО элементов отправляем
             // 3. MPI_UNSIGNED_CHAR - ТИП данных (беззнаковый char)
-            // 4. dest - КОМУ отправляем (номер процесса-получателя)
+            // 4. proc - КОМУ отправляем (номер процесса-получателя)
             // 5. 0 - ТЕГ сообщения (метка, чтобы различать разные сообщения)
             // 6. MPI_COMM_WORLD - КОММУНИКАТОР (группа процессов)
-            MPI_Send(&mas[dest_start], chunk_size, MPI_UNSIGNED_CHAR, 
-                     dest, 0, MPI_COMM_WORLD);
+            MPI_Send(&mas[proc_start], chunk_size, MPI_UNSIGNED_CHAR, 
+                     proc, 0, MPI_COMM_WORLD);
         }
         
         delete[] mas;
@@ -88,17 +81,57 @@ int main(int argc, char** argv) {
         // 4. 0 - ОТ КОГО ждём данные (от процесса 0)
         // 5. 0 - ТЕГ сообщения (должен совпадать с тегом в Send)
         // 6. MPI_COMM_WORLD - КОММУНИКАТОР
-        // 7. MPI_STATUS_IGNORE - статус (нам не нужен, поэтому игнорируем)
-        MPI_Recv(local_data, local_size, MPI_UNSIGNED_CHAR, 
+        // 7. MPI_STATUS_IGNORE - статус
+        MPI_Recv(&local_data[1], local_size, MPI_UNSIGNED_CHAR, 
                  0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
     }
     
+    if (rank > 0) {
+        //есть левый сосед(процесс rank-1)
+        //отправляем ему мой ПЕРВЫЙ элемент(он станет его right_peace)
+        //получаю от него его ПОСЛЕДНИЙ элемент(он станет моим left_peace)
+        
+        unsigned char my_first = local_data[1];  // Мой первый реальный элемент
+        unsigned char left_peace;
+        
+        // MPI_Sendrecv - отправка и приём одновременно
+        // Отправка: данные, размер, тип, кому, тег
+        // Приём: буфер, размер, тип, от кого, тег
+        // Коммуникатор, статус
+        MPI_Sendrecv(&my_first, 1, MPI_UNSIGNED_CHAR, rank - 1, 0,
+                     &left_peace, 1, MPI_UNSIGNED_CHAR, rank - 1, 0,
+                     MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        
+        local_data[0] = left_peace;  // Сохраняем в left_peace позицию
+
+    } else {
+        //процесс 0: нет левого соседа, left_peace не нужен
+        local_data[0] = 0;
+    }
+    
+    // Обмен с ПРАВЫМ соседом
+    if (rank < num_processes - 1) {
+        //есть правый сосед (процесс rank+1)
+        //отправляем ему мой ПОСЛЕДНИЙ элемент(он станет его left_peace)
+        //получаю от него его ПЕРВЫЙ элемент(он станет моим right_peace)
+        
+        unsigned char my_last = local_data[local_size];  // Мой последний реальный элемент
+        unsigned char right_peace;
+        
+        MPI_Sendrecv(&my_last, 1, MPI_UNSIGNED_CHAR, rank + 1, 0,
+                     &right_peace, 1, MPI_UNSIGNED_CHAR, rank + 1, 0,
+                     MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        
+        local_data[local_size + 1] = right_peace;  // Сохраняем в right_peace позицию
+    } else {
+        local_data[local_size + 1] = 0;
+    }
 
     int local_count = 0;
 
-    for (int i = 0; i < local_size; i++) {
+    for (int i = 1; i <= local_size; i++) {
         // global_i - это индекс элемента в ИСХОДНОМ большом массиве
-        int global_i = start + i;
+        int global_i = start + (i-1);
         
         // СЛУЧАЙ 1: Самый первый элемент массива (индекс 0)
         if (global_i == 0) {
@@ -115,48 +148,16 @@ int main(int argc, char** argv) {
             }
         }
         else {
-            // Проблема на границах кусков:
-            // Например, процесс 1 обрабатывает элементы 200000000 - 399999999
-            // Для элемента 200000000 левый сосед (199999999) находится у процесса 0!
-            // Мы его НЕ видим в своём local_data
+            // local_data[i-1] - левый сосед (может быть ghost)
+            // local_data[i]   - текущий элемент
+            // local_data[i+1] - правый сосед (может быть ghost)
             
-            bool left_ok, right_ok;
-            
-            // Проверка ЛЕВОГО соседа
-            if (i == 0 && rank > 0) {
-                // Мы на границе куска (первый элемент) И мы не процесс 0
-                // Значит левый сосед в другом процессе
-                // УПРОЩЕНИЕ: считаем что условие выполнено
-                // (в реальности нужно запросить этот элемент у соседнего процесса)
-                left_ok = true;
-            } else if (i > 0) {
-                // Левый сосед в нашем куске - просто сравниваем
-                left_ok = (local_data[i] >= local_data[i - 1]);
-            } else {
-                left_ok = true;
-            }
-            
-            // Проверка ПРАВОГО соседа
-            if (i == local_size - 1 && rank < num_processes - 1) {
-                // Мы на границе куска (последний элемент) И мы не последний процесс
-                // Значит правый сосед в другом процессе
-                // УПРОЩЕНИЕ: считаем что условие выполнено
-                right_ok = true;
-            } else if (i < local_size - 1) {
-                // Правый сосед в нашем куске - просто сравниваем
-                right_ok = (local_data[i] >= local_data[i + 1]);
-            } else {
-                right_ok = true;
-            }
-            
-            // Если элемент больше или равен ОБОИМ соседям - это локальный максимум
-            if (left_ok && right_ok) {
+            if (local_data[i] >= local_data[i - 1] && 
+                local_data[i] >= local_data[i + 1]) {
                 local_count++;
             }
         }
     }
-    
-    cout << "Процесс " << rank << ": нашёл " << local_count << " локальных максимумов" << endl;
     
     if (rank == 0) {
 
